@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,11 +86,36 @@ def looks_binary(data: bytes) -> bool:
     return controls / len(sample) > 0.10
 
 
+def _iter_source_paths(root: Path, warnings: list[str]) -> Iterator[Path]:
+    def on_error(_error: OSError) -> None:
+        warnings.append("Could not read a source directory; diagnostic details suppressed")
+
+    for directory, subdirectories, filenames in os.walk(root, topdown=True, onerror=on_error, followlinks=False):
+        parent = Path(directory)
+        retained = []
+        for name in subdirectories:
+            path = parent / name
+            try:
+                is_symlink = path.is_symlink()
+            except OSError as error:
+                on_error(error)
+                continue
+            if is_symlink:
+                warnings.append(f"Skipped symbolic link: {path.relative_to(root).as_posix()}")
+            elif name not in IGNORED_DIRS:
+                retained.append(name)
+        # Prune before walking: filtering files after rglob still visits every
+        # directory in virtual environments, dependency trees and VCS metadata.
+        subdirectories[:] = retained
+        for name in filenames:
+            yield parent / name
+
+
 def iter_text_files(root: Path, limits: ScanLimits) -> tuple[list[TextFile], list[str]]:
     files: list[TextFile] = []
     warnings: list[str] = []
     total = 0
-    for path in root.rglob("*"):
+    for path in _iter_source_paths(root, warnings):
         try:
             if path.is_symlink():
                 warnings.append(f"Skipped symbolic link: {path.relative_to(root).as_posix()}")
@@ -96,8 +123,6 @@ def iter_text_files(root: Path, limits: ScanLimits) -> tuple[list[TextFile], lis
             if not path.is_file():
                 continue
             relative = path.relative_to(root)
-            if any(part in IGNORED_DIRS for part in relative.parts[:-1]):
-                continue
             if (path.name not in SPECIAL_TEXT_NAMES and path.suffix.lower() not in TEXT_SUFFIXES
                     and not path.name.startswith(".env.")):
                 continue
